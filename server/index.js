@@ -13,43 +13,6 @@ const PORT = process.env.PORT || 5000;
 app.use(cors());
 app.use(express.json());
 
-// Initialize SQLite Database
-const dbPath = path.join(__dirname, 'exam_database.sqlite');
-const db = new Database(dbPath);
-
-// Create tables if they do not exist
-db.exec(`
-  CREATE TABLE IF NOT EXISTS questions (
-    id INTEGER PRIMARY KEY,
-    question TEXT NOT NULL,
-    options TEXT NOT NULL,
-    correctAnswer INTEGER NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS results (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    studentName TEXT NOT NULL,
-    studentGroup TEXT NOT NULL,
-    correctCount INTEGER NOT NULL,
-    totalCount INTEGER NOT NULL,
-    scorePercentage INTEGER NOT NULL,
-    timeSpentSeconds INTEGER NOT NULL,
-    submittedAt TEXT NOT NULL,
-    details TEXT NOT NULL,
-    violationsCount INTEGER DEFAULT 0,
-    isAutoSubmitted INTEGER DEFAULT 0
-  );
-
-  CREATE TABLE IF NOT EXISTS settings (
-    key TEXT PRIMARY KEY,
-    value TEXT NOT NULL
-  );
-`);
-
-// Safely alter existing table if needed
-try { db.exec("ALTER TABLE results ADD COLUMN violationsCount INTEGER DEFAULT 0;"); } catch (e) {}
-try { db.exec("ALTER TABLE results ADD COLUMN isAutoSubmitted INTEGER DEFAULT 0;"); } catch (e) {}
-
 // Default 30 HTML Questions
 const DEFAULT_QUESTIONS = [
   { id: 1, question: "HTML qisqartmasining to'liq ma'nosi nima?", options: ["HyperText Markup Language", "HyperTech Modern Language", "HighText Machine Language", "Home Tool Markup Language"], correctAnswer: 0 },
@@ -84,26 +47,80 @@ const DEFAULT_QUESTIONS = [
   { id: 30, question: "Qator ichidagi (inline) matnlarni va elementlarni guruhlash uchun qaysi teg ishlatiladi?", options: ["<div>", "<span>", "<p>", "<inline>"], correctAnswer: 1 }
 ];
 
-// Seed Questions if database is empty
-const countStmt = db.prepare('SELECT count(*) as count FROM questions').get();
-if (countStmt.count === 0) {
-  const insertStmt = db.prepare('INSERT INTO questions (id, question, options, correctAnswer) VALUES (?, ?, ?, ?)');
-  const insertMany = db.transaction((qs) => {
-    for (const q of qs) {
-      insertStmt.run(q.id, q.question, JSON.stringify(q.options), q.correctAnswer);
-    }
-  });
-  insertMany(DEFAULT_QUESTIONS);
-  console.log('Seeded 30 default HTML questions into SQLite database.');
-}
+let db = null;
+let memoryQuestions = [...DEFAULT_QUESTIONS];
+let memoryResults = [];
+let memorySettings = {
+  timeLimitMinutes: 30,
+  examTitle: "HTML Bo'yicha Bilimni Sinash Imtihoni",
+  adminPassword: "admin",
+  enableAntiCheating: true,
+  maxViolationsAllowed: 3
+};
 
-// Seed Settings if empty
-const settingsCount = db.prepare('SELECT count(*) as count FROM settings').get();
-if (settingsCount.count === 0) {
-  const insertSetting = db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)');
-  insertSetting.run('timeLimitMinutes', '30');
-  insertSetting.run('examTitle', 'HTML Bo\'yicha Bilimni Sinash Imtihoni');
-  insertSetting.run('adminPassword', 'admin');
+// Safe Database Connection
+try {
+  const dbPath = path.join(__dirname, 'exam_database.sqlite');
+  db = new Database(dbPath);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS questions (
+      id INTEGER PRIMARY KEY,
+      question TEXT NOT NULL,
+      options TEXT NOT NULL,
+      correctAnswer INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS results (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      studentName TEXT NOT NULL,
+      studentGroup TEXT NOT NULL,
+      correctCount INTEGER NOT NULL,
+      totalCount INTEGER NOT NULL,
+      scorePercentage INTEGER NOT NULL,
+      timeSpentSeconds INTEGER NOT NULL,
+      submittedAt TEXT NOT NULL,
+      details TEXT NOT NULL,
+      violationsCount INTEGER DEFAULT 0,
+      isAutoSubmitted INTEGER DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+  `);
+
+  try { db.exec("ALTER TABLE results ADD COLUMN violationsCount INTEGER DEFAULT 0;"); } catch (_) {}
+  try { db.exec("ALTER TABLE results ADD COLUMN isAutoSubmitted INTEGER DEFAULT 0;"); } catch (_) {}
+
+  // Seed Questions if empty
+  const countStmt = db.prepare('SELECT count(*) as count FROM questions').get();
+  if (countStmt.count === 0) {
+    const insertStmt = db.prepare('INSERT INTO questions (id, question, options, correctAnswer) VALUES (?, ?, ?, ?)');
+    const insertMany = db.transaction((qs) => {
+      for (const q of qs) {
+        insertStmt.run(q.id, q.question, JSON.stringify(q.options), q.correctAnswer);
+      }
+    });
+    insertMany(DEFAULT_QUESTIONS);
+  }
+
+  // Seed Settings if empty
+  const settingsCount = db.prepare('SELECT count(*) as count FROM settings').get();
+  if (settingsCount.count === 0) {
+    const insertSetting = db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)');
+    insertSetting.run('timeLimitMinutes', '30');
+    insertSetting.run('examTitle', 'HTML Bo\'yicha Bilimni Sinash Imtihoni');
+    insertSetting.run('adminPassword', 'admin');
+    insertSetting.run('enableAntiCheating', 'true');
+    insertSetting.run('maxViolationsAllowed', '3');
+  }
+
+  console.log("SQLite Database connected successfully.");
+} catch (err) {
+  console.warn("SQLite Database failed to initialize, using in-memory store fallback:", err.message);
+  db = null;
 }
 
 // --- API ROUTES ---
@@ -111,14 +128,17 @@ if (settingsCount.count === 0) {
 // 1. GET Questions
 app.get('/api/questions', (req, res) => {
   try {
-    const rows = db.prepare('SELECT * FROM questions ORDER BY id ASC').all();
-    const questions = rows.map(r => ({
-      id: r.id,
-      question: r.question,
-      options: JSON.parse(r.options),
-      correctAnswer: r.correctAnswer
-    }));
-    res.json(questions);
+    if (db) {
+      const rows = db.prepare('SELECT * FROM questions ORDER BY id ASC').all();
+      const questions = rows.map(r => ({
+        id: r.id,
+        question: r.question,
+        options: JSON.parse(r.options),
+        correctAnswer: r.correctAnswer
+      }));
+      return res.json(questions);
+    }
+    res.json(memoryQuestions);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -128,14 +148,17 @@ app.get('/api/questions', (req, res) => {
 app.post('/api/questions', (req, res) => {
   try {
     const newQuestions = req.body;
-    db.prepare('DELETE FROM questions').run();
-    const insertStmt = db.prepare('INSERT INTO questions (id, question, options, correctAnswer) VALUES (?, ?, ?, ?)');
-    const insertMany = db.transaction((qs) => {
-      for (const q of qs) {
-        insertStmt.run(q.id, q.question, JSON.stringify(q.options), q.correctAnswer);
-      }
-    });
-    insertMany(newQuestions);
+    memoryQuestions = newQuestions;
+    if (db) {
+      db.prepare('DELETE FROM questions').run();
+      const insertStmt = db.prepare('INSERT INTO questions (id, question, options, correctAnswer) VALUES (?, ?, ?, ?)');
+      const insertMany = db.transaction((qs) => {
+        for (const q of qs) {
+          insertStmt.run(q.id, q.question, JSON.stringify(q.options), q.correctAnswer);
+        }
+      });
+      insertMany(newQuestions);
+    }
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -145,14 +168,17 @@ app.post('/api/questions', (req, res) => {
 // 3. Restore Default Questions
 app.post('/api/questions/restore-defaults', (req, res) => {
   try {
-    db.prepare('DELETE FROM questions').run();
-    const insertStmt = db.prepare('INSERT INTO questions (id, question, options, correctAnswer) VALUES (?, ?, ?, ?)');
-    const insertMany = db.transaction((qs) => {
-      for (const q of qs) {
-        insertStmt.run(q.id, q.question, JSON.stringify(q.options), q.correctAnswer);
-      }
-    });
-    insertMany(DEFAULT_QUESTIONS);
+    memoryQuestions = [...DEFAULT_QUESTIONS];
+    if (db) {
+      db.prepare('DELETE FROM questions').run();
+      const insertStmt = db.prepare('INSERT INTO questions (id, question, options, correctAnswer) VALUES (?, ?, ?, ?)');
+      const insertMany = db.transaction((qs) => {
+        for (const q of qs) {
+          insertStmt.run(q.id, q.question, JSON.stringify(q.options), q.correctAnswer);
+        }
+      });
+      insertMany(DEFAULT_QUESTIONS);
+    }
     res.json({ success: true, questions: DEFAULT_QUESTIONS });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -162,23 +188,26 @@ app.post('/api/questions/restore-defaults', (req, res) => {
 // 4. GET All Student Results
 app.get('/api/results', (req, res) => {
   try {
-    const rows = db.prepare('SELECT * FROM results ORDER BY id DESC').all();
-    const results = rows.map(r => ({
-      dbId: r.id,
-      studentInfo: {
-        fullName: r.studentName,
-        group: r.studentGroup
-      },
-      correctCount: r.correctCount,
-      totalCount: r.totalCount,
-      scorePercentage: r.scorePercentage,
-      timeSpentSeconds: r.timeSpentSeconds,
-      submittedAt: r.submittedAt,
-      violationsCount: r.violationsCount || 0,
-      isAutoSubmitted: Boolean(r.isAutoSubmitted),
-      details: JSON.parse(r.details)
-    }));
-    res.json(results);
+    if (db) {
+      const rows = db.prepare('SELECT * FROM results ORDER BY id DESC').all();
+      const results = rows.map(r => ({
+        dbId: r.id,
+        studentInfo: {
+          fullName: r.studentName,
+          group: r.studentGroup
+        },
+        correctCount: r.correctCount,
+        totalCount: r.totalCount,
+        scorePercentage: r.scorePercentage,
+        timeSpentSeconds: r.timeSpentSeconds,
+        submittedAt: r.submittedAt,
+        violationsCount: r.violationsCount || 0,
+        isAutoSubmitted: Boolean(r.isAutoSubmitted),
+        details: JSON.parse(r.details)
+      }));
+      return res.json(results);
+    }
+    res.json(memoryResults);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -188,35 +217,43 @@ app.get('/api/results', (req, res) => {
 app.post('/api/results', (req, res) => {
   try {
     const data = req.body;
-    const stmt = db.prepare(`
-      INSERT INTO results 
-      (studentName, studentGroup, correctCount, totalCount, scorePercentage, timeSpentSeconds, submittedAt, details, violationsCount, isAutoSubmitted) 
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-    const info = stmt.run(
-      data.studentInfo.fullName,
-      data.studentInfo.group || 'Guruh ko\'rsatilmagan',
-      data.correctCount,
-      data.totalCount,
-      data.scorePercentage,
-      data.timeSpentSeconds,
-      data.submittedAt,
-      JSON.stringify(data.details || []),
-      data.violationsCount || 0,
-      data.isAutoSubmitted ? 1 : 0
-    );
-    res.json({ success: true, dbId: info.lastInsertRowid });
+    let newDbId = Date.now();
+    if (db) {
+      const stmt = db.prepare(`
+        INSERT INTO results 
+        (studentName, studentGroup, correctCount, totalCount, scorePercentage, timeSpentSeconds, submittedAt, details, violationsCount, isAutoSubmitted) 
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      const info = stmt.run(
+        data.studentInfo.fullName,
+        data.studentInfo.group || 'Guruh ko\'rsatilmagan',
+        data.correctCount,
+        data.totalCount,
+        data.scorePercentage,
+        data.timeSpentSeconds,
+        data.submittedAt,
+        JSON.stringify(data.details || []),
+        data.violationsCount || 0,
+        data.isAutoSubmitted ? 1 : 0
+      );
+      newDbId = info.lastInsertRowid;
+    }
+    const itemWithId = { ...data, dbId: newDbId };
+    memoryResults.unshift(itemWithId);
+    res.json({ success: true, dbId: newDbId });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// 6. DELETE Specific Student Result from Database
+// 6. DELETE Specific Student Result
 app.delete('/api/results/:id', (req, res) => {
   try {
     const dbId = req.params.id;
-    const stmt = db.prepare('DELETE FROM results WHERE id = ?');
-    stmt.run(dbId);
+    if (db) {
+      db.prepare('DELETE FROM results WHERE id = ?').run(dbId);
+    }
+    memoryResults = memoryResults.filter(r => String(r.dbId) !== String(dbId));
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -226,7 +263,10 @@ app.delete('/api/results/:id', (req, res) => {
 // 7. DELETE All Student Results
 app.delete('/api/results', (req, res) => {
   try {
-    db.prepare('DELETE FROM results').run();
+    if (db) {
+      db.prepare('DELETE FROM results').run();
+    }
+    memoryResults = [];
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -236,15 +276,18 @@ app.delete('/api/results', (req, res) => {
 // 8. GET Settings
 app.get('/api/settings', (req, res) => {
   try {
-    const rows = db.prepare('SELECT * FROM settings').all();
-    const settings = {};
-    rows.forEach(r => {
-      if (r.key === 'timeLimitMinutes') settings[r.key] = Number(r.value);
-      else if (r.key === 'maxViolationsAllowed') settings[r.key] = Number(r.value);
-      else if (r.key === 'enableAntiCheating') settings[r.key] = r.value === 'true';
-      else settings[r.key] = r.value;
-    });
-    res.json(settings);
+    if (db) {
+      const rows = db.prepare('SELECT * FROM settings').all();
+      const settings = {};
+      rows.forEach(r => {
+        if (r.key === 'timeLimitMinutes') settings[r.key] = Number(r.value);
+        else if (r.key === 'maxViolationsAllowed') settings[r.key] = Number(r.value);
+        else if (r.key === 'enableAntiCheating') settings[r.key] = r.value === 'true';
+        else settings[r.key] = r.value;
+      });
+      return res.json(settings);
+    }
+    res.json(memorySettings);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -254,12 +297,20 @@ app.get('/api/settings', (req, res) => {
 app.post('/api/settings', (req, res) => {
   try {
     const { timeLimitMinutes, examTitle, adminPassword, enableAntiCheating, maxViolationsAllowed } = req.body;
-    const stmt = db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)');
-    if (timeLimitMinutes !== undefined) stmt.run('timeLimitMinutes', String(timeLimitMinutes));
-    if (examTitle !== undefined) stmt.run('examTitle', examTitle);
-    if (adminPassword !== undefined) stmt.run('adminPassword', adminPassword);
-    if (enableAntiCheating !== undefined) stmt.run('enableAntiCheating', String(enableAntiCheating));
-    if (maxViolationsAllowed !== undefined) stmt.run('maxViolationsAllowed', String(maxViolationsAllowed));
+    if (timeLimitMinutes !== undefined) memorySettings.timeLimitMinutes = Number(timeLimitMinutes);
+    if (examTitle !== undefined) memorySettings.examTitle = examTitle;
+    if (adminPassword !== undefined) memorySettings.adminPassword = adminPassword;
+    if (enableAntiCheating !== undefined) memorySettings.enableAntiCheating = Boolean(enableAntiCheating);
+    if (maxViolationsAllowed !== undefined) memorySettings.maxViolationsAllowed = Number(maxViolationsAllowed);
+
+    if (db) {
+      const stmt = db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)');
+      if (timeLimitMinutes !== undefined) stmt.run('timeLimitMinutes', String(timeLimitMinutes));
+      if (examTitle !== undefined) stmt.run('examTitle', examTitle);
+      if (adminPassword !== undefined) stmt.run('adminPassword', adminPassword);
+      if (enableAntiCheating !== undefined) stmt.run('enableAntiCheating', String(enableAntiCheating));
+      if (maxViolationsAllowed !== undefined) stmt.run('maxViolationsAllowed', String(maxViolationsAllowed));
+    }
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
