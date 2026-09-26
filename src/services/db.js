@@ -1,48 +1,31 @@
+import { createClient } from '@supabase/supabase-js';
 import { DEFAULT_QUESTIONS, DEFAULT_SETTINGS } from '../data/defaultQuestions';
 
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
 const SUPABASE_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
-const isSupabaseConfigured = Boolean(SUPABASE_URL && SUPABASE_KEY);
-
-const headers = () => ({
-  'Content-Type': 'application/json',
-  'apikey': SUPABASE_KEY,
-  'Authorization': `Bearer ${SUPABASE_KEY}`,
-  'Prefer': 'return=representation'
-});
-
-// Helper for Supabase REST API
-async function supabaseFetch(endpoint, options = {}) {
-  const url = `${SUPABASE_URL}/rest/v1/${endpoint}`;
-  const response = await fetch(url, {
-    ...options,
-    headers: {
-      ...headers(),
-      ...options.headers
-    }
-  });
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`Supabase API error: ${response.status} - ${errorText}`);
-  }
-  if (response.status === 204) return null;
-  return await response.json();
-}
+export const supabase = (SUPABASE_URL && SUPABASE_KEY)
+  ? createClient(SUPABASE_URL, SUPABASE_KEY)
+  : null;
 
 // === QUESTIONS ===
 export async function fetchQuestions() {
-  if (isSupabaseConfigured) {
+  if (supabase) {
     try {
-      const data = await supabaseFetch('questions?select=*&order=id.asc');
-      if (Array.isArray(data) && data.length > 0) {
+      const { data, error } = await supabase
+        .from('questions')
+        .select('*')
+        .order('id', { ascending: true });
+
+      if (error) console.error('Supabase fetchQuestions error:', error);
+      if (data && data.length > 0) {
         return data.map(q => ({
           ...q,
           options: typeof q.options === 'string' ? JSON.parse(q.options) : q.options
         }));
       }
     } catch (err) {
-      console.warn('Supabase fetchQuestions error:', err);
+      console.warn('Supabase fetchQuestions exception:', err);
     }
   }
 
@@ -60,21 +43,14 @@ export async function fetchQuestions() {
 }
 
 export async function saveQuestions(newQuestions) {
-  if (isSupabaseConfigured) {
+  if (supabase) {
     try {
-      // Clear existing questions
-      await fetch(`${SUPABASE_URL}/rest/v1/questions?id=neq.0`, {
-        method: 'DELETE',
-        headers: headers()
-      });
-      // Insert new questions
-      await supabaseFetch('questions', {
-        method: 'POST',
-        body: JSON.stringify(newQuestions)
-      });
+      await supabase.from('questions').delete().neq('id', 0);
+      const { error } = await supabase.from('questions').insert(newQuestions);
+      if (error) console.error('Supabase saveQuestions error:', error);
       return true;
     } catch (err) {
-      console.error('Supabase saveQuestions error:', err);
+      console.error('Supabase saveQuestions exception:', err);
     }
   }
 
@@ -95,10 +71,15 @@ export async function restoreDefaultQuestions() {
 
 // === RESULTS ===
 export async function fetchResults() {
-  if (isSupabaseConfigured) {
+  if (supabase) {
     try {
-      const data = await supabaseFetch('results?select=*&order=id.desc');
-      if (Array.isArray(data)) {
+      const { data, error } = await supabase
+        .from('results')
+        .select('*')
+        .order('id', { ascending: false });
+
+      if (error) console.error('Supabase fetchResults error:', error);
+      if (data) {
         return data.map(r => ({
           dbId: r.id,
           studentInfo: {
@@ -116,7 +97,7 @@ export async function fetchResults() {
         }));
       }
     } catch (err) {
-      console.warn('Supabase fetchResults error:', err);
+      console.warn('Supabase fetchResults exception:', err);
     }
   }
 
@@ -133,7 +114,7 @@ export async function fetchResults() {
 }
 
 export async function saveResult(submissionData) {
-  if (isSupabaseConfigured) {
+  if (supabase) {
     try {
       const row = {
         studentName: submissionData.studentInfo.fullName,
@@ -147,15 +128,17 @@ export async function saveResult(submissionData) {
         violationsCount: submissionData.violationsCount || 0,
         isAutoSubmitted: Boolean(submissionData.isAutoSubmitted)
       };
-      const result = await supabaseFetch('results', {
-        method: 'POST',
-        body: JSON.stringify(row)
-      });
-      if (Array.isArray(result) && result[0]) {
-        return result[0].id;
+      const { data, error } = await supabase
+        .from('results')
+        .insert([row])
+        .select();
+
+      if (error) console.error('Supabase saveResult error:', error);
+      if (data && data[0]) {
+        return data[0].id;
       }
     } catch (err) {
-      console.error('Supabase saveResult error:', err);
+      console.error('Supabase saveResult exception:', err);
     }
   }
 
@@ -175,15 +158,13 @@ export async function saveResult(submissionData) {
 }
 
 export async function deleteStudentResult(dbId) {
-  if (isSupabaseConfigured && dbId) {
+  if (supabase && dbId) {
     try {
-      await fetch(`${SUPABASE_URL}/rest/v1/results?id=eq.${dbId}`, {
-        method: 'DELETE',
-        headers: headers()
-      });
+      const { error } = await supabase.from('results').delete().eq('id', dbId);
+      if (error) console.error('Supabase deleteStudentResult error:', error);
       return true;
     } catch (err) {
-      console.error('Supabase deleteStudentResult error:', err);
+      console.error('Supabase deleteStudentResult exception:', err);
     }
   }
 
@@ -195,30 +176,29 @@ export async function deleteStudentResult(dbId) {
 }
 
 export async function clearAllResults() {
-  if (isSupabaseConfigured) {
+  if (supabase) {
     try {
-      await fetch(`${SUPABASE_URL}/rest/v1/results?id=neq.0`, {
-        method: 'DELETE',
-        headers: headers()
-      });
+      const { error } = await supabase.from('results').delete().neq('id', 0);
+      if (error) console.error('Supabase clearAllResults error:', error);
       return true;
     } catch (err) {
-      console.error('Supabase clearAllResults error:', err);
+      console.error('Supabase clearAllResults exception:', err);
     }
   }
 
   try {
-    await fetch('/api/results', { method: 'DELETE' });
+    await fetch('/api/results');
   } catch (_) {}
   localStorage.removeItem('exam_results');
 }
 
 // === SETTINGS ===
 export async function fetchSettings() {
-  if (isSupabaseConfigured) {
+  if (supabase) {
     try {
-      const data = await supabaseFetch('settings?select=*');
-      if (Array.isArray(data) && data.length > 0) {
+      const { data, error } = await supabase.from('settings').select('*');
+      if (error) console.error('Supabase fetchSettings error:', error);
+      if (data && data.length > 0) {
         const obj = {};
         data.forEach(r => {
           if (r.key === 'timeLimitMinutes') obj[r.key] = Number(r.value);
@@ -229,7 +209,7 @@ export async function fetchSettings() {
         return obj;
       }
     } catch (err) {
-      console.warn('Supabase fetchSettings error:', err);
+      console.warn('Supabase fetchSettings exception:', err);
     }
   }
 
@@ -246,7 +226,7 @@ export async function fetchSettings() {
 }
 
 export async function saveSettings(newSettings) {
-  if (isSupabaseConfigured) {
+  if (supabase) {
     try {
       const rows = [
         { key: 'timeLimitMinutes', value: String(newSettings.timeLimitMinutes) },
@@ -255,17 +235,11 @@ export async function saveSettings(newSettings) {
         { key: 'enableAntiCheating', value: String(newSettings.enableAntiCheating) },
         { key: 'maxViolationsAllowed', value: String(newSettings.maxViolationsAllowed) }
       ];
-      await fetch(`${SUPABASE_URL}/rest/v1/settings`, {
-        method: 'POST',
-        headers: {
-          ...headers(),
-          'Prefer': 'resolution=merge-duplicates'
-        },
-        body: JSON.stringify(rows)
-      });
+      const { error } = await supabase.from('settings').upsert(rows);
+      if (error) console.error('Supabase saveSettings error:', error);
       return true;
     } catch (err) {
-      console.error('Supabase saveSettings error:', err);
+      console.error('Supabase saveSettings exception:', err);
     }
   }
 
