@@ -6,6 +6,17 @@ import QuizSuccess from './components/QuizSuccess';
 import AdminDashboard from './components/AdminDashboard';
 import AdminLoginModal from './components/AdminLoginModal';
 import { DEFAULT_QUESTIONS, DEFAULT_SETTINGS } from './data/defaultQuestions';
+import {
+  fetchQuestions,
+  saveQuestions as dbSaveQuestions,
+  restoreDefaultQuestions as dbRestoreDefaultQuestions,
+  fetchResults,
+  saveResult as dbSaveResult,
+  deleteStudentResult,
+  clearAllResults,
+  fetchSettings,
+  saveSettings as dbSaveSettings
+} from './services/db';
 import './styles/App.css';
 
 export default function App() {
@@ -30,41 +41,21 @@ export default function App() {
   const [isAdminLoggedIn, setIsAdminLoggedIn] = useState(false);
   const [isAdminLoginModalOpen, setIsAdminLoginModalOpen] = useState(false);
 
-  // Fetch initial data from SQLite Database API on startup
+  // Fetch initial data on startup
   useEffect(() => {
     const loadDbData = async () => {
       try {
-        // Fetch Questions
-        const qRes = await fetch('/api/questions');
-        if (qRes.ok) {
-          const qData = await qRes.json();
-          if (Array.isArray(qData) && qData.length > 0) {
-            setQuestions(qData);
-            localStorage.setItem('exam_questions', JSON.stringify(qData));
-          }
-        }
+        const [qData, sData, rData] = await Promise.all([
+          fetchQuestions(),
+          fetchSettings(),
+          fetchResults()
+        ]);
 
-        // Fetch Settings
-        const sRes = await fetch('/api/settings');
-        if (sRes.ok) {
-          const sData = await sRes.json();
-          if (sData && sData.timeLimitMinutes) {
-            setSettings(prev => ({ ...prev, ...sData }));
-            localStorage.setItem('exam_settings', JSON.stringify(sData));
-          }
-        }
-
-        // Fetch Student Results
-        const rRes = await fetch('/api/results');
-        if (rRes.ok) {
-          const rData = await rRes.json();
-          if (Array.isArray(rData)) {
-            setResults(rData);
-            localStorage.setItem('exam_results', JSON.stringify(rData));
-          }
-        }
+        if (Array.isArray(qData) && qData.length > 0) setQuestions(qData);
+        if (sData && sData.timeLimitMinutes) setSettings(prev => ({ ...prev, ...sData }));
+        if (Array.isArray(rData)) setResults(rData);
       } catch (err) {
-        console.warn("Could not connect to backend server DB, using local state fallback:", err);
+        console.warn("Error loading database data:", err);
       }
     };
 
@@ -81,17 +72,10 @@ export default function App() {
     // Save to State & LocalStorage immediately
     setResults((prev) => [submissionData, ...prev]);
 
-    // Send POST to SQLite Database Server
+    // Send to Database
     try {
-      const response = await fetch('/api/results', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(submissionData)
-      });
-      if (response.ok) {
-        const resData = await response.json();
-        submissionData.dbId = resData.dbId;
-      }
+      const dbId = await dbSaveResult(submissionData);
+      submissionData.dbId = dbId;
     } catch (e) {
       console.error("Database save error:", e);
     }
@@ -118,13 +102,8 @@ export default function App() {
   // Admin Question Handlers
   const handleSaveQuestions = async (newQuestions) => {
     setQuestions(newQuestions);
-    localStorage.setItem('exam_questions', JSON.stringify(newQuestions));
     try {
-      await fetch('/api/questions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(newQuestions)
-      });
+      await dbSaveQuestions(newQuestions);
     } catch (e) {
       console.error("Save questions DB error:", e);
     }
@@ -132,9 +111,8 @@ export default function App() {
 
   const handleRestoreDefaultQuestions = async () => {
     setQuestions(DEFAULT_QUESTIONS);
-    localStorage.setItem('exam_questions', JSON.stringify(DEFAULT_QUESTIONS));
     try {
-      await fetch('/api/questions/restore-defaults', { method: 'POST' });
+      await dbRestoreDefaultQuestions();
     } catch (e) {
       console.error("Restore questions DB error:", e);
     }
@@ -145,10 +123,10 @@ export default function App() {
     // Remove from UI state
     setResults((prev) => prev.filter((r, i) => (r.dbId ? r.dbId !== dbId : i !== index)));
 
-    // Send DELETE to SQLite DB
+    // Delete from DB
     if (dbId) {
       try {
-        await fetch(`/api/results/${dbId}`, { method: 'DELETE' });
+        await deleteStudentResult(dbId);
       } catch (e) {
         console.error("Delete student DB error:", e);
       }
@@ -157,9 +135,8 @@ export default function App() {
 
   const handleClearResults = async () => {
     setResults([]);
-    localStorage.removeItem('exam_results');
     try {
-      await fetch('/api/results', { method: 'DELETE' });
+      await clearAllResults();
     } catch (e) {
       console.error("Clear results DB error:", e);
     }
@@ -168,13 +145,8 @@ export default function App() {
   // Admin Settings Handler
   const handleSaveSettings = async (newSettings) => {
     setSettings(newSettings);
-    localStorage.setItem('exam_settings', JSON.stringify(newSettings));
     try {
-      await fetch('/api/settings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(newSettings)
-      });
+      await dbSaveSettings(newSettings);
     } catch (e) {
       console.error("Save settings DB error:", e);
     }
